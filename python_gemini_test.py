@@ -24,7 +24,7 @@ def run_gemini_inference():
         # --- 2. Initialize the Model ---
         # We'll use the 'gemini-pro' model which is suitable for a wide
         # range of natural language tasks.
-        print("Initializing the Gemini Pro model...")
+        print("Initializing the Gemini 2.5 flash lite model...")
         model = genai.GenerativeModel('gemini-2.5-flash-lite')
 
         # --- 3. Send a Prompt and Get the Response ---
