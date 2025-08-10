@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Chat with Ollama</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .chat-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .chat-container::-webkit-scrollbar-thumb {
+            background-color: #4a5568;
+            border-radius: 4px;
+        }
+        /* --- NEW CSS FOR DELETE BUTTON --- */
+        .conv-item {
+            position: relative; /* Needed for absolute positioning of the child button */
+        }
+        .delete-btn {
+            display: none; /* Hidden by default */
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            padding: 2px 6px;
+            border-radius: 4px;
+            background-color: #ef4444; /* red-500 */
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 1;
+        }
+        .conv-item:hover .delete-btn {
+            display: block; /* Show on hover */
+        }
+        .delete-btn:hover {
+            background-color: #dc2626; /* red-600 */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex h-screen">
+
+    <div class="w-1/4 bg-gray-800 p-4 flex flex-col">
+        <h1 class="text-2xl font-bold mb-4">Conversations</h1>
+        <button id="new-chat-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg mb-4 transition-colors">
+            + New Chat
+        </button>
+        <div id="conversations-list" class="flex-grow overflow-y-auto">
+            </div>
+    </div>
+
+    <div class="w-3/4 flex flex-col">
+        <div id="chat-window" class="flex-grow p-6 flex flex-col">
+            <div id="chat-messages" class="flex-grow overflow-y-auto chat-container pr-4">
+                <div class="text-center text-gray-400 h-full flex items-center justify-center">
+                    <p>Select a conversation or start a new one.</p>
+                </div>
+            </div>
+            <div id="chat-input-container" class="mt-6 flex items-center hidden">
+                <input type="text" id="chat-input" class="w-full bg-gray-700 border border-gray-600 rounded-l-lg p-4 focus:outline-none focus:ring-2 focus:ring-blue-500 text-white" placeholder="Type your message...">
+                <button id="send-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-r-lg transition-colors">
+                    Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const newChatBtn = document.getElementById('new-chat-btn');
+            const conversationsList = document.getElementById('conversations-list');
+            const chatMessages = document.getElementById('chat-messages');
+            const chatInput = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('send-btn');
+            const chatInputContainer = document.getElementById('chat-input-container');
+
+            const API_BASE_URL = 'http://localhost:5000';
+            let activeConversationId = null;
+
+            // --- Event Listeners ---
+            newChatBtn.addEventListener('click', createNewConversation);
+            sendBtn.addEventListener('click', sendMessage);
+            chatInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+
+            // --- Core Functions ---
+
+            async function loadConversations() {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/conversations`);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const conversations = await response.json();
+                    
+                    conversationsList.innerHTML = '';
+                    if (conversations.length === 0) {
+                        conversationsList.innerHTML = '<div class="text-gray-500 p-3 text-center">No chats yet.</div>';
+                        return;
+                    }
+                    
+                    conversations.forEach(conv => {
+                        const convElement = document.createElement('div');
+                        // --- MODIFIED: Added 'conv-item' class for hover effect ---
+                        convElement.className = `conv-item p-3 my-1 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors`;
+                        convElement.dataset.id = conv.id;
+
+                        // --- MODIFIED: Create separate elements for title and delete button ---
+                        const titleSpan = document.createElement('span');
+                        titleSpan.textContent = conv.title;
+
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.textContent = '✕';
+                        deleteBtn.className = 'delete-btn';
+                        deleteBtn.onclick = (e) => {
+                            e.stopPropagation(); // Prevent click from bubbling up to the conversation div
+                            deleteConversation(conv.id, convElement);
+                        };
+                        
+                        convElement.appendChild(titleSpan);
+                        convElement.appendChild(deleteBtn);
+                        
+                        convElement.addEventListener('click', () => switchConversation(conv.id));
+                        conversationsList.appendChild(convElement);
+                    });
+                } catch (error) {
+                    console.error('Error loading conversations:', error);
+                    conversationsList.innerHTML = '<div class="text-red-500 p-3">Error loading conversations. Is the Python server running?</div>';
+                }
+            }
+
+            // --- NEW: Function to delete a conversation ---
+            async function deleteConversation(conversationId, element) {
+                if (!confirm('Are you sure you want to permanently delete this conversation?')) {
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
+                        method: 'DELETE',
+                    });
+
+                    if (response.ok) {
+                        element.remove(); // Remove the conversation from the sidebar
+                        if (activeConversationId === conversationId) {
+                            resetChatView(); // If the active chat was deleted, reset the main window
+                        }
+                    } else {
+                        const err = await response.json();
+                        alert(`Error: ${err.error || 'Could not delete conversation.'}`);
+                    }
+                } catch (error) {
+                    console.error('Failed to delete conversation:', error);
+                    alert('An error occurred while trying to delete the conversation.');
+                }
+            }
+            
+            // --- NEW: Helper function to reset the chat view ---
+            function resetChatView() {
+                activeConversationId = null;
+                chatMessages.innerHTML = `
+                    <div class="text-center text-gray-400 h-full flex items-center justify-center">
+                        <p>Select a conversation or start a new one.</p>
+                    </div>`;
+                chatInputContainer.classList.add('hidden');
+                // Un-highlight all conversations
+                conversationsList.querySelectorAll('div[data-id]').forEach(c => {
+                    c.classList.remove('bg-gray-700');
+                });
+            }
+
+            async function createNewConversation() {
+                try {
+                    newChatBtn.disabled = true;
+                    const response = await fetch(`${API_BASE_URL}/api/conversations`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title: 'New Chat' })
+                    });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const newConv = await response.json();
+                    await loadConversations();
+                    switchConversation(newConv.id);
+                } catch (error) {
+                    console.error('Error creating new conversation:', error);
+                } finally {
+                    newChatBtn.disabled = false;
+                }
+            }
+
+            function switchConversation(conversationId) {
+                activeConversationId = conversationId;
+                loadMessages(conversationId);
+                chatInputContainer.classList.remove('hidden');
+                
+                conversationsList.querySelectorAll('div[data-id]').forEach(c => {
+                    c.classList.toggle('bg-gray-700', parseInt(c.dataset.id) === conversationId);
+                });
+            }
+
+            async function loadMessages(conversationId) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}/messages`);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const messages = await response.json();
+                    
+                    chatMessages.innerHTML = '';
+                    if (messages.length === 0) {
+                        chatMessages.innerHTML = '<div class="text-center text-gray-400 h-full flex items-center justify-center"><p>Start the conversation!</p></div>';
+                    } else {
+                        messages.forEach(msg => appendMessage(msg.sender, msg.content));
+                    }
+                } catch (error) {
+                    console.error('Error loading messages:', error);
+                    chatMessages.innerHTML = '<div class="text-red-500 p-3">Error loading messages.</div>';
+                }
+            }
+            
+            async function updateConversationTitle(conversationId, newTitle) {
+                try {
+                    const shortTitle = newTitle.substring(0, 30) + (newTitle.length > 30 ? '...' : '');
+                    const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title: shortTitle })
+                    });
+                    if (response.ok) {
+                        const convElement = conversationsList.querySelector(`div[data-id='${conversationId}'] > span`);
+                        if (convElement) {
+                            convElement.textContent = shortTitle;
+                        }
+                    } else {
+                         console.error('Failed to save title to server:', await response.text());
+                    }
+                } catch (error) {
+                    console.error('Error updating title:', error);
+                }
+            }
+
+            async function sendMessage() {
+                const messageText = chatInput.value.trim();
+                // --- FIX PART 1: Capture the conversation ID at the moment of sending ---
+                const conversationIdForThisMessage = activeConversationId;
+
+                if (!messageText || !conversationIdForThisMessage) return;
+                
+                const convElement = conversationsList.querySelector(`div[data-id='${conversationIdForThisMessage}'] > span`);
+                if (convElement && convElement.textContent === 'New Chat') {
+                    updateConversationTitle(conversationIdForThisMessage, messageText);
+                }
+
+                appendMessage('user', messageText);
+                chatInput.value = '';
+                setLoading(true);
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/conversations/${conversationIdForThisMessage}/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: messageText })
+                    });
+
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    
+                    const data = await response.json();
+
+                    // --- FIX PART 2: Only append the message if the user is still in the same conversation ---
+                    if (activeConversationId === conversationIdForThisMessage) {
+                        appendMessage('bot', data.bot_message);
+                    } else {
+                        console.log('Bot response received for a non-active conversation. Not displaying.');
+                    }
+
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                    // Also check here before showing an error message in the wrong window
+                    if (activeConversationId === conversationIdForThisMessage) {
+                        appendMessage('bot', 'Sorry, an error occurred. Is your Ollama server running?', true);
+                    }
+                } finally {
+                    // Also check here before re-enabling the input for the wrong window
+                    if (activeConversationId === conversationIdForThisMessage) {
+                        setLoading(false);
+                    }
+                }
+            }
+
+            function appendMessage(sender, text, isError = false) {
+                const initialMessage = chatMessages.querySelector('.text-center');
+                if (initialMessage) initialMessage.remove();
+
+                const messageElement = document.createElement('div');
+                const bubbleClass = sender === 'user' ? 'bg-blue-600 ml-auto' : 'bg-gray-600';
+                const errorClass = isError ? '!bg-red-600' : '';
+                messageElement.className = `max-w-xl p-3 rounded-lg mb-2 ${bubbleClass} ${errorClass}`;
+                messageElement.textContent = text;
+                chatMessages.appendChild(messageElement);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
+            function setLoading(isLoading) {
+                sendBtn.disabled = isLoading;
+                chatInput.disabled = isLoading;
+                if (isLoading) {
+                    sendBtn.innerHTML = '<svg class="animate-spin h-5 w-5 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+                } else {
+                    sendBtn.textContent = 'Send';
+                }
+            }
+
+            loadConversations();
+        });
+    </script>
+</body>
+</html>
