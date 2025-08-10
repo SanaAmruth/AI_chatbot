@@ -1,21 +1,29 @@
 import os
 import sqlite3
-from flask import Flask, request, jsonify, send_from_directory, g
-from flask_cors import CORS # Import CORS
-import requests
+from flask import Flask, request, jsonify, g
+from flask_cors import CORS
 import traceback
+import google.generativeai as genai
 
 # --- Configuration ---
 DB_FILE = "chat_app.db"
-OLLAMA_API_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "phi3:latest"
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 app.config['DATABASE'] = DB_FILE
-
-# --- Enable CORS ---
 CORS(app)
+
+# --- Gemini API Configuration ---
+# The script will look for the API key in your environment variables.
+try:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable not set.")
+    genai.configure(api_key=api_key)
+    print("Gemini API key configured successfully.")
+except Exception as e:
+    print(f"FATAL: Error configuring Gemini API: {e}")
+
 
 # --- Database Schema (Embedded) ---
 SCHEMA_SQL = """
@@ -62,11 +70,6 @@ def init_db():
 
 # --- API Endpoints ---
 
-@app.route('/')
-def index():
-    """Serves the main HTML page."""
-    return send_from_directory('.', 'index.html')
-
 @app.route('/api/conversations', methods=['GET', 'POST'])
 def handle_conversations():
     """Handles getting all conversations and creating a new one."""
@@ -93,23 +96,6 @@ def handle_conversations():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Failed to retrieve conversations: {str(e)}"}), 500
-
-@app.route('/api/conversations/<int:conversation_id>', methods=['PUT'])
-def update_conversation_title(conversation_id):
-    """Updates the title of a specific conversation."""
-    try:
-        data = request.get_json()
-        new_title = data.get('title')
-        if not new_title:
-            return jsonify({"error": "Title is required"}), 400
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, conversation_id))
-        db.commit()
-        return jsonify({"success": True, "id": conversation_id, "title": new_title})
-    except Exception as e:
-        print(f"Error updating conversation title: {e}")
-        return jsonify({"error": f"Failed to update title: {str(e)}"}), 500
 
 @app.route('/api/conversations/<int:conversation_id>', methods=['PUT', 'DELETE'])
 def manage_single_conversation(conversation_id):
@@ -147,7 +133,7 @@ def manage_single_conversation(conversation_id):
 
 @app.route('/api/conversations/<int:conversation_id>/messages', methods=['GET', 'POST'])
 def handle_messages(conversation_id):
-    """Handles getting messages and adding a new one to a conversation."""
+    """Handles getting messages and adding a new one using the Gemini API."""
     db = get_db()
     cursor = db.cursor()
 
@@ -163,23 +149,28 @@ def handle_messages(conversation_id):
                            (conversation_id, 'user', user_message))
             db.commit()
 
-            # Get history and call Ollama
+            # --- Gemini API Call ---
+            # 1. Get history from DB
             cursor.execute("SELECT sender, content FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC", (conversation_id,))
-            history = [{"role": row["sender"], "content": row["content"]} for row in cursor.fetchall()]
             
-            ollama_payload = {"model": MODEL_NAME, "messages": history, "stream": False}
-            response = requests.post(OLLAMA_API_URL, json=ollama_payload, timeout=60)
-            response.raise_for_status()
-            bot_message = response.json()['message']['content']
+            # 2. Format history for Gemini API. The 'bot' role must be 'model'.
+            gemini_history = []
+            for row in cursor.fetchall():
+                role = "model" if row["sender"] == "bot" else "user"
+                gemini_history.append({"role": role, "parts": [{"text": row["content"]}]})
 
-            # Save bot message
+            # 3. Initialize the model and generate content
+            model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
+            response = model.generate_content(gemini_history)
+            
+            bot_message = response.text
+
+            # 4. Save bot message to DB
             cursor.execute("INSERT INTO messages (conversation_id, sender, content) VALUES (?, ?, ?)",
                            (conversation_id, 'bot', bot_message))
             db.commit()
             return jsonify({"user_message": user_message, "bot_message": bot_message})
 
-        except requests.exceptions.RequestException as e:
-            return jsonify({"error": f"Ollama API error: {e}"}), 500
         except Exception as e:
             traceback.print_exc()
             return jsonify({"error": f"An internal error occurred: {str(e)}"}), 500
@@ -195,7 +186,6 @@ def handle_messages(conversation_id):
 
 # --- App Startup ---
 if __name__ == '__main__':
-    # Ensure the database file exists and has the correct schema
     if not os.path.exists(DB_FILE):
         print(f"Database file not found. Creating and initializing at {DB_FILE}...")
         init_db()
